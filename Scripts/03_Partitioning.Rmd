@@ -1,0 +1,1800 @@
+---
+title: "Train/Test split"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Setup
+
+Defining work directory within rmarkdown chunk
+
+```{r}
+library(here)
+knitr::opts_knit$set(root.dir = dirname(here::here()))
+local_wd_folder <- dirname(here::here())
+```
+
+Defining input data and output directories
+
+```{r}
+data_folder = paste(local_wd_folder, '/Data', sep = '')
+Figures_folder = paste(local_wd_folder, '/Figures', sep = '')
+
+dir.create(data_folder, showWarnings = FALSE, recursive = TRUE)
+dir.create(Figures_folder, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r}
+reference_data_folder = paste(local_wd_folder, '/Data/References', sep = '')
+Training_barcodes_data_folder = paste(local_wd_folder, '/Data/Training_barcodes', sep = '')
+Testing_barcodes_data_folder = paste(local_wd_folder, '/Data/Testing_barcodes', sep = '')
+
+dir.create(reference_data_folder, showWarnings = FALSE, recursive = TRUE)
+
+dir.create(Training_barcodes_data_folder, showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Training_barcodes_data_folder, '/Zhang'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Training_barcodes_data_folder, '/Hao'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Training_barcodes_data_folder, '/Triana'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Training_barcodes_data_folder, '/Luecken'), showWarnings = FALSE, recursive = TRUE)
+
+dir.create(Testing_barcodes_data_folder, showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Testing_barcodes_data_folder, '/Zhang'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Testing_barcodes_data_folder, '/Hao'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Testing_barcodes_data_folder, '/Triana'), showWarnings = FALSE, recursive = TRUE)
+dir.create(paste0(Testing_barcodes_data_folder, '/Luecken'), showWarnings = FALSE, recursive = TRUE)
+```
+
+Change the default timeout for long downloads accordingly to your connection speed
+
+```{r}
+options(timeout=3000)
+```
+
+Setting seed
+
+This step ensures reproducibility in randomized processes
+
+```{r}
+set.seed(123)
+```
+
+Loading libraries
+
+```{r}
+library(SeuratDisk, quietly = T)
+library(sceasy, quietly = T)
+library(stringr, quietly = T)
+library(Seurat, quietly = T)
+library(R.utils, quietly = T)
+```
+
+# 2. Load data
+
+## - Zhang X. et al. (2024). Nature Immunology 2024
+
+```{r}
+Zhang.SCObject <- sceasy::convertFormat(obj = paste0(local_wd_folder, '/Data/References/Zhang/Zhang_adata_annotated.h5ad'), 
+                      from="anndata", to="seurat", assay = 'ADT', main_layer = 'counts')
+
+lab <- as.character(Zhang.SCObject$Consensus_annotation_detailed_final)
+
+lab[is.na(lab)] <- "NA"
+
+lab[lab %in% c("HSC", "MPP", "LMPP")]      <- "HSC_MPP"
+lab[lab == "Gamma delta T"]        <- "gdT"
+lab[lab == "Double negative T"]    <- "dnT"
+
+Zhang.SCObject$Consensus_annotation_detailed_final <- factor(lab)
+
+Zhang.SCObject <- subset(Zhang.SCObject, cells = WhichCells(Zhang.SCObject, expression = Consensus_annotation_detailed_final %in% names(table(Zhang.SCObject$Consensus_annotation_detailed_final))[grep(FALSE, table(Zhang.SCObject$Consensus_annotation_detailed_final) < 50)]))
+
+Zhang.SCObject@assays$ADT@meta.features <- data.frame(row.names =  rownames(Zhang.SCObject@assays$ADT@data),
+  stringsAsFactors = FALSE,
+  name = rownames(Zhang.SCObject@assays$ADT@data)
+)
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Zhang.SCObject) <- "ADT"
+prop_train <- 0.80
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Zhang.SCObject@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Zhang.SCObject[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+test_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Zhang.SCObject)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Zhang.SCObject, cells = cells_lbl)
+  
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@var.features),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  test_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  test_cells  <- c(test_cells,  test_lbl)
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Zhang.SCObject_Train <- subset(Zhang.SCObject, cells = train_cells)
+Zhang.SCObject_Test  <- subset(Zhang.SCObject, cells = test_cells)
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Zhang.SCObject_Train)) {
+  Zhang.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 3) Sanity checks -----------------------------------------------------
+stopifnot(length(intersect(colnames(Zhang.SCObject_Train),
+                           colnames(Zhang.SCObject_Test))) == 0)
+stopifnot(setequal(
+  c(colnames(Zhang.SCObject_Train), colnames(Zhang.SCObject_Test)),
+  colnames(Zhang.SCObject)
+))
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Zhang.SCObject_Train$Consensus_annotation_detailed_final)
+table(Zhang.SCObject_Test$Consensus_annotation_detailed_final)
+
+DimPlot(Zhang.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Zhang.SCObject_Test, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Zhang.SCObject_Train <- NormalizeData(Zhang.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Zhang.SCObject_Test <- NormalizeData(Zhang.SCObject_Test, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Zhang.SCObject_Train.AvgExpMat <- AverageExpression(Zhang.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Zhang.SCObject_Test.AvgExpMat <- AverageExpression(Zhang.SCObject_Test, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Zhang.SCObject_Train.AvgExpMat$ADT)
+test_mat  <- as.matrix(Zhang.SCObject_Test.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(test_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, test_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Zhang.SCObject_Train) <- "ADT"
+prop_train <- 0.90
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Zhang.SCObject_Train@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Zhang.SCObject_Train[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+cal_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Zhang.SCObject_Train)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Zhang.SCObject_Train, cells = cells_lbl)
+  
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@var.features),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  cal_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  cal_cells  <- c(cal_cells,  cal_lbl)
+}
+
+DefaultAssay(Zhang.SCObject_Train) <- 'ADT'
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Zhang.SCObject_Train)) {
+  Zhang.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Zhang.SCObject_Cal  <- subset(Zhang.SCObject_Train, cells = cal_cells)
+Zhang.SCObject_Train <- subset(Zhang.SCObject_Train, cells = train_cells)
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Zhang.SCObject_Train$Consensus_annotation_detailed_final)
+table(Zhang.SCObject_Cal$Consensus_annotation_detailed_final)
+
+DimPlot(Zhang.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Zhang.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Zhang.SCObject_Train <- NormalizeData(Zhang.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Zhang.SCObject_Cal <- NormalizeData(Zhang.SCObject_Cal, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Zhang.SCObject_Train.AvgExpMat <- AverageExpression(Zhang.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Zhang.SCObject_Cal.AvgExpMat <- AverageExpression(Zhang.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Zhang.SCObject_Train.AvgExpMat$ADT)
+cal_mat  <- as.matrix(Zhang.SCObject_Cal.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(cal_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, cal_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+sceasy::convertFormat(obj = Zhang.SCObject_Train, outFile = paste0(local_wd_folder, '/Data/References/Zhang/Zhang_adata_annotated_Train.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Zhang.SCObject_Test, outFile = paste0(local_wd_folder, '/Data/References/Zhang/Zhang_adata_annotated_Test.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Zhang.SCObject_Cal, outFile = paste0(local_wd_folder, '/Data/References/Zhang/Zhang_adata_annotated_Cal.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Zhang.SCObject_Train[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Zhang.SCObject_Train@meta.data)[grep(TRUE,Zhang.SCObject_Train@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Zhang.SCObject_Train)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Zhang.SCObject_Train, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    obj_one <- SketchData(
+      object   = obj_one,
+      group.by = NULL,
+      features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    obj_rest <- subset(Zhang.SCObject_Train, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    one_ids  <- colnames(obj_one@assays$sketch)
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Zhang.SCObject_One  <- subset(Zhang.SCObject_Train, cells = one_ids)
+    Zhang.SCObject_Rest <- subset(Zhang.SCObject_Train, cells = rest_lbl)
+
+  print(
+      DimPlot(Zhang.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Zhang.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Training_barcodes_data_folder, "Zhang", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_training_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Zhang.SCObject_Test[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Zhang.SCObject_Test@meta.data)[grep(TRUE,Zhang.SCObject_Test@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Zhang.SCObject_Test)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Zhang.SCObject_Test, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    if (n_pos <= 50) {
+      
+      one_ids  <- one_ids
+      
+    } else {
+    
+      obj_one <- SketchData(
+        object   = obj_one,
+        group.by = NULL,
+        features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+        assay    = "ADT",
+        n        = min(round(n_pos), round(length(rest_ids))),
+        seed     = 123,
+        verbose  = TRUE
+      )
+      
+      one_ids  <- colnames(obj_one@assays$sketch)
+      
+    }
+
+    obj_rest <- subset(Zhang.SCObject_Test, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Zhang.SCObject_One  <- subset(Zhang.SCObject_Test, cells = one_ids)
+    Zhang.SCObject_Rest <- subset(Zhang.SCObject_Test, cells = rest_lbl)
+
+  print(
+      DimPlot(Zhang.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Zhang.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Testing_barcodes_data_folder, "Zhang", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_testing_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+## - Hao Y. et al. (2021). Cell
+
+```{r}
+Hao.SCObject <- sceasy::convertFormat(obj = paste0(local_wd_folder, '/Data/References/Hao/228AB_healthy_donors_PBMNCs_annotated.h5ad'), 
+                      from="anndata", to="seurat", assay = 'ADT', main_layer = 'counts')
+
+lab <- as.character(Hao.SCObject$Consensus_annotation_detailed_final)
+
+lab[is.na(lab)] <- "NA"
+
+lab[lab %in% c("HSC", "MPP", "LMPP")]      <- "HSC_MPP"
+lab[lab == "Gamma delta T"]        <- "gdT"
+lab[lab == "Double negative T"]    <- "dnT"
+
+Hao.SCObject$Consensus_annotation_detailed_final <- factor(lab)
+
+Hao.SCObject <- subset(Hao.SCObject, cells = WhichCells(Hao.SCObject, expression = Consensus_annotation_detailed_final %in% names(table(Hao.SCObject$Consensus_annotation_detailed_final))[grep(FALSE, table(Hao.SCObject$Consensus_annotation_detailed_final) < 50)]))
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Hao.SCObject) <- "ADT"
+prop_train <- 0.80
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Hao.SCObject@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Hao.SCObject[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+test_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Hao.SCObject)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Hao.SCObject, cells = cells_lbl)
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@data),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  test_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  test_cells  <- c(test_cells,  test_lbl)
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Hao.SCObject_Train <- subset(Hao.SCObject, cells = train_cells)
+Hao.SCObject_Test  <- subset(Hao.SCObject, cells = test_cells)
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Hao.SCObject_Train)) {
+  Hao.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 3) Sanity checks -----------------------------------------------------
+stopifnot(length(intersect(colnames(Hao.SCObject_Train),
+                           colnames(Hao.SCObject_Test))) == 0)
+stopifnot(setequal(
+  c(colnames(Hao.SCObject_Train), colnames(Hao.SCObject_Test)),
+  colnames(Hao.SCObject)
+))
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Hao.SCObject_Train$Consensus_annotation_detailed_final)
+table(Hao.SCObject_Test$Consensus_annotation_detailed_final)
+
+DimPlot(Hao.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'wnn.umap', label = T) + DimPlot(Hao.SCObject_Test, group.by = 'Consensus_annotation_detailed_final', reduction = 'wnn.umap', label = T)
+
+Hao.SCObject_Train <- NormalizeData(Hao.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Hao.SCObject_Test <- NormalizeData(Hao.SCObject_Test, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Hao.SCObject_Train.AvgExpMat <- AverageExpression(Hao.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Hao.SCObject_Test.AvgExpMat <- AverageExpression(Hao.SCObject_Test, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Hao.SCObject_Train.AvgExpMat$ADT)
+test_mat  <- as.matrix(Hao.SCObject_Test.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(test_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, test_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Hao.SCObject_Train) <- "ADT"
+prop_train <- 0.90
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Hao.SCObject_Train@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Hao.SCObject_Train[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+cal_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Hao.SCObject_Train)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Hao.SCObject_Train, cells = cells_lbl)
+  
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@var.features),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  cal_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  cal_cells  <- c(cal_cells,  cal_lbl)
+}
+
+DefaultAssay(Hao.SCObject_Train) <- 'ADT'
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Hao.SCObject_Train)) {
+  Hao.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Hao.SCObject_Cal  <- subset(Hao.SCObject_Train, cells = cal_cells)
+Hao.SCObject_Train <- subset(Hao.SCObject_Train, cells = train_cells)
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Hao.SCObject_Train$Consensus_annotation_detailed_final)
+table(Hao.SCObject_Cal$Consensus_annotation_detailed_final)
+
+DimPlot(Hao.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Hao.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Hao.SCObject_Train <- NormalizeData(Hao.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Hao.SCObject_Cal <- NormalizeData(Hao.SCObject_Cal, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Hao.SCObject_Train.AvgExpMat <- AverageExpression(Hao.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Hao.SCObject_Cal.AvgExpMat <- AverageExpression(Hao.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Hao.SCObject_Train.AvgExpMat$ADT)
+cal_mat  <- as.matrix(Hao.SCObject_Cal.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(cal_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, cal_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+sceasy::convertFormat(obj = Hao.SCObject_Train, outFile = paste0(local_wd_folder, '/Data/References/Hao/228AB_healthy_donors_PBMNCs_annotated_Train.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Hao.SCObject_Test, outFile = paste0(local_wd_folder, '/Data/References/Hao/228AB_healthy_donors_PBMNCs_annotated_Test.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Hao.SCObject_Cal, outFile = paste0(local_wd_folder, '/Data/References/Hao/228AB_healthy_donors_PBMNCs_annotated_Cal.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Hao.SCObject_Train[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Hao.SCObject_Train@meta.data)[grep(TRUE,Hao.SCObject_Train@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Hao.SCObject_Train)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Hao.SCObject_Train, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    obj_one <- SketchData(
+      object   = obj_one,
+      group.by = NULL,
+      features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    obj_rest <- subset(Hao.SCObject_Train, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    one_ids  <- colnames(obj_one@assays$sketch)
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Hao.SCObject_One  <- subset(Hao.SCObject_Train, cells = one_ids)
+    Hao.SCObject_Rest <- subset(Hao.SCObject_Train, cells = rest_lbl)
+
+  print(
+      DimPlot(Hao.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Hao.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Training_barcodes_data_folder, "Hao", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_training_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Hao.SCObject_Test[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Hao.SCObject_Test@meta.data)[grep(TRUE,Hao.SCObject_Test@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Hao.SCObject_Test)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Hao.SCObject_Test, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    if (n_pos <= 50) {
+      
+      one_ids  <- one_ids
+      
+    } else {
+    
+      obj_one <- SketchData(
+        object   = obj_one,
+        group.by = NULL,
+        features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+        assay    = "ADT",
+        n        = min(round(n_pos), round(length(rest_ids))),
+        seed     = 123,
+        verbose  = TRUE
+      )
+      
+      one_ids  <- colnames(obj_one@assays$sketch)
+      
+    }
+
+    obj_rest <- subset(Hao.SCObject_Test, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Hao.SCObject_One  <- subset(Hao.SCObject_Test, cells = one_ids)
+    Hao.SCObject_Rest <- subset(Hao.SCObject_Test, cells = rest_lbl)
+
+  print(
+      DimPlot(Hao.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Hao.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Testing_barcodes_data_folder, "Hao", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_testing_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+## - Triana S. et al. (2021). Nature Immunology
+
+```{r}
+Triana.SCObject <- sceasy::convertFormat(obj = paste0(local_wd_folder, '/Data/References/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs_annotated.h5ad'), 
+                      from="anndata", to="seurat", assay = 'AB', main_layer = 'counts')
+
+lab <- as.character(Triana.SCObject$Consensus_annotation_detailed_final)
+
+lab[is.na(lab)] <- "NA"
+
+lab[lab %in% c("HSC", "MPP", "LMPP")]      <- "HSC_MPP"
+lab[lab == "Gamma delta T"]        <- "gdT"
+lab[lab == "Double negative T"]    <- "dnT"
+
+Triana.SCObject$Consensus_annotation_detailed_final <- factor(lab)
+
+Triana.SCObject <- subset(Triana.SCObject, cells = WhichCells(Triana.SCObject, expression = Consensus_annotation_detailed_final %in% names(table(Triana.SCObject$Consensus_annotation_detailed_final))[grep(FALSE, table(Triana.SCObject$Consensus_annotation_detailed_final) < 50)]))
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Triana.SCObject) <- "AB"
+prop_train <- 0.80
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Triana.SCObject@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Triana.SCObject[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+test_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Triana.SCObject)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Triana.SCObject, cells = cells_lbl)
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'AB',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'AB')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["AB"]]@data),
+    assay    = "AB",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  test_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  test_cells  <- c(test_cells,  test_lbl)
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Triana.SCObject_Train <- subset(Triana.SCObject, cells = train_cells)
+Triana.SCObject_Test  <- subset(Triana.SCObject, cells = test_cells)
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Triana.SCObject_Train)) {
+  Triana.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 3) Sanity checks -----------------------------------------------------
+stopifnot(length(intersect(colnames(Triana.SCObject_Train),
+                           colnames(Triana.SCObject_Test))) == 0)
+stopifnot(setequal(
+  c(colnames(Triana.SCObject_Train), colnames(Triana.SCObject_Test)),
+  colnames(Triana.SCObject)
+))
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Triana.SCObject_Train$Consensus_annotation_detailed_final)
+table(Triana.SCObject_Test$Consensus_annotation_detailed_final)
+
+DimPlot(Triana.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'mofaumap', label = T) + DimPlot(Triana.SCObject_Test, group.by = 'Consensus_annotation_detailed_final', reduction = 'mofaumap', label = T)
+
+Triana.SCObject_Train <- NormalizeData(Triana.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'AB',
+                                    verbose = T
+)
+
+Triana.SCObject_Test <- NormalizeData(Triana.SCObject_Test, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'AB',
+                                    verbose = T
+)
+
+
+Triana.SCObject_Train.AvgExpMat <- AverageExpression(Triana.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Triana.SCObject_Test.AvgExpMat <- AverageExpression(Triana.SCObject_Test, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Triana.SCObject_Train.AvgExpMat$AB)
+test_mat  <- as.matrix(Triana.SCObject_Test.AvgExpMat$AB)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(test_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, test_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Triana.SCObject_Train) <- "AB"
+prop_train <- 0.90
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Triana.SCObject_Train@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Triana.SCObject_Train[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+cal_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Triana.SCObject_Train)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Triana.SCObject_Train, cells = cells_lbl)
+  
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'AB',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'AB')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["AB"]]@var.features),
+    assay    = "AB",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  cal_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  cal_cells  <- c(cal_cells,  cal_lbl)
+}
+
+DefaultAssay(Triana.SCObject_Train) <- 'AB'
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Triana.SCObject_Train)) {
+  Triana.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Triana.SCObject_Cal  <- subset(Triana.SCObject_Train, cells = cal_cells)
+Triana.SCObject_Train <- subset(Triana.SCObject_Train, cells = train_cells)
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Triana.SCObject_Train$Consensus_annotation_detailed_final)
+table(Triana.SCObject_Cal$Consensus_annotation_detailed_final)
+
+DimPlot(Triana.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Triana.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Triana.SCObject_Train <- NormalizeData(Triana.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'AB',
+                                    verbose = T
+)
+
+Triana.SCObject_Cal <- NormalizeData(Triana.SCObject_Cal, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'AB',
+                                    verbose = T
+)
+
+
+Triana.SCObject_Train.AvgExpMat <- AverageExpression(Triana.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Triana.SCObject_Cal.AvgExpMat <- AverageExpression(Triana.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Triana.SCObject_Train.AvgExpMat$AB)
+cal_mat  <- as.matrix(Triana.SCObject_Cal.AvgExpMat$AB)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(cal_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, cal_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+sceasy::convertFormat(obj = Triana.SCObject_Train, outFile = paste0(local_wd_folder, '/Data/References/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs_annotated_Train.h5ad'),
+                      from="seurat", to="anndata", assay = 'AB', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Triana.SCObject_Test, outFile = paste0(local_wd_folder, '/Data/References/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs_annotated_Test.h5ad'),
+                      from="seurat", to="anndata", assay = 'AB', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Triana.SCObject_Cal, outFile = paste0(local_wd_folder, '/Data/References/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs_annotated_Cal.h5ad'),
+                      from="seurat", to="anndata", assay = 'AB', main_layer = 'counts')
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Triana.SCObject_Train[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Triana.SCObject_Train@meta.data)[grep(TRUE,Triana.SCObject_Train@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Triana.SCObject_Train)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Triana.SCObject_Train, 
+                      cells = one_ids)
+
+    # AB normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "AB", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "AB")
+
+    obj_one <- SketchData(
+      object   = obj_one,
+      group.by = NULL,
+      features = obj_one@assays$AB@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "AB",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    obj_rest <- subset(Triana.SCObject_Train, cells = rest_ids)
+
+    # AB normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "AB", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "AB")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$AB@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "AB",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    one_ids  <- colnames(obj_one@assays$sketch)
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Triana.SCObject_One  <- subset(Triana.SCObject_Train, cells = one_ids)
+    Triana.SCObject_Rest <- subset(Triana.SCObject_Train, cells = rest_lbl)
+
+  print(
+      DimPlot(Triana.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Triana.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Training_barcodes_data_folder, "Triana", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_training_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Triana.SCObject_Test[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Triana.SCObject_Test@meta.data)[grep(TRUE,Triana.SCObject_Test@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Triana.SCObject_Test)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Triana.SCObject_Test, 
+                      cells = one_ids)
+
+    # AB normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "AB", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "AB")
+
+    if (n_pos <= 50) {
+      
+      one_ids  <- one_ids
+      
+    } else {
+    
+      obj_one <- SketchData(
+        object   = obj_one,
+        group.by = NULL,
+        features = obj_one@assays$AB@var.features,      # or set to NULL if your SketchData handles it
+        assay    = "AB",
+        n        = min(round(n_pos), round(length(rest_ids))),
+        seed     = 123,
+        verbose  = TRUE
+      )
+      
+      one_ids  <- colnames(obj_one@assays$sketch)
+      
+    }
+
+    obj_rest <- subset(Triana.SCObject_Test, cells = rest_ids)
+
+    # AB normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "AB", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "AB")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$AB@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "AB",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Triana.SCObject_One  <- subset(Triana.SCObject_Test, cells = one_ids)
+    Triana.SCObject_Rest <- subset(Triana.SCObject_Test, cells = rest_lbl)
+
+  print(
+      DimPlot(Triana.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Triana.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Testing_barcodes_data_folder, "Triana", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_testing_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+## - Luecken M.D. et al. (2021). NeurIPS 2021 Datasets and Benchmarks Track
+
+```{r}
+Luecken.SCObject <- sceasy::convertFormat(obj = paste0(local_wd_folder, '/Data/References/Luecken/140AB_adult_healthy_donor_BMMNCs_annotated.h5ad'), 
+                      from="anndata", to="seurat", assay = 'ADT', main_layer = 'counts')
+
+lab <- as.character(Luecken.SCObject$Consensus_annotation_detailed_final)
+
+lab[is.na(lab)] <- "NA"
+
+lab[lab %in% c("HSC", "MPP", "LMPP")]      <- "HSC_MPP"
+lab[lab == "Gamma delta T"]        <- "gdT"
+lab[lab == "Double negative T"]    <- "dnT"
+
+Luecken.SCObject$Consensus_annotation_detailed_final <- factor(lab)
+
+Luecken.SCObject <- subset(Luecken.SCObject, cells = WhichCells(Luecken.SCObject, expression = Consensus_annotation_detailed_final %in% names(table(Luecken.SCObject$Consensus_annotation_detailed_final))[grep(FALSE, table(Luecken.SCObject$Consensus_annotation_detailed_final) < 50)]))
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Luecken.SCObject) <- "ADT"
+prop_train <- 0.80
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Luecken.SCObject@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Luecken.SCObject[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+test_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Luecken.SCObject)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Luecken.SCObject, cells = cells_lbl)
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@data),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  test_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  test_cells  <- c(test_cells,  test_lbl)
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Luecken.SCObject_Train <- subset(Luecken.SCObject, cells = train_cells)
+Luecken.SCObject_Test  <- subset(Luecken.SCObject, cells = test_cells)
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Luecken.SCObject_Train)) {
+  Luecken.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 3) Sanity checks -----------------------------------------------------
+stopifnot(length(intersect(colnames(Luecken.SCObject_Train),
+                           colnames(Luecken.SCObject_Test))) == 0)
+stopifnot(setequal(
+  c(colnames(Luecken.SCObject_Train), colnames(Luecken.SCObject_Test)),
+  colnames(Luecken.SCObject)
+))
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Luecken.SCObject_Train$Consensus_annotation_detailed_final)
+table(Luecken.SCObject_Test$Consensus_annotation_detailed_final)
+
+DimPlot(Luecken.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Luecken.SCObject_Test, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Luecken.SCObject_Train <- NormalizeData(Luecken.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Luecken.SCObject_Test <- NormalizeData(Luecken.SCObject_Test, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Luecken.SCObject_Train.AvgExpMat <- AverageExpression(Luecken.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Luecken.SCObject_Test.AvgExpMat <- AverageExpression(Luecken.SCObject_Test, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Luecken.SCObject_Train.AvgExpMat$ADT)
+test_mat  <- as.matrix(Luecken.SCObject_Test.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(test_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, test_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+# 0) Prep -------------------------------------------------------------
+DefaultAssay(Luecken.SCObject_Train) <- "ADT"
+prop_train <- 0.90
+label_col  <- "Consensus_annotation_detailed_final"
+
+# (Optional) ensure the label exists
+stopifnot(label_col %in% colnames(Luecken.SCObject_Train@meta.data))
+
+# 1) Stratified sketch per label --------------------------------------
+labels <- Luecken.SCObject_Train[[label_col]][,1]
+labels[is.na(labels)] <- "NA"                         # handle NAs explicitly
+lvls   <- sort(unique(labels))
+
+train_cells <- character()
+cal_cells  <- character()
+
+for (lbl in lvls) {
+  cells_lbl <- colnames(Luecken.SCObject_Train)[labels == lbl]
+  if (!length(cells_lbl)) next
+
+  obj_sub <- subset(Luecken.SCObject_Train, cells = cells_lbl)
+  
+  
+  obj_sub <- NormalizeData(obj_sub, 
+                                      normalization.method = "CLR",
+                                      margin = 2,
+                                      assay = 'ADT',
+                                      verbose = T
+  )
+  
+  obj_sub <- FindVariableFeatures(obj_sub, assay = 'ADT')
+
+  obj_sub <- SketchData(
+    object   = obj_sub,
+    group.by = NULL,                                  # sketch *within* this label only
+    features = rownames(obj_sub[["ADT"]]@var.features),
+    assay    = "ADT",
+    n        = max(1, round(ncol(obj_sub) * prop_train)),
+    seed     = 123,
+    verbose  = TRUE
+  )
+
+  train_lbl <- colnames(obj_sub[["sketch"]]@data)     # sketched cells = train
+  cal_lbl  <- setdiff(cells_lbl, train_lbl)          # remainder = test
+
+  train_cells <- c(train_cells, train_lbl)
+  cal_cells  <- c(cal_cells,  cal_lbl)
+}
+
+DefaultAssay(Luecken.SCObject_Train) <- 'ADT'
+
+# Drop the temporary 'sketch' assay in Train (optional)
+if ("sketch" %in% Assays(Luecken.SCObject_Train)) {
+  Luecken.SCObject_Train[["sketch"]] <- NULL
+}
+
+# 2) Build Train/Test objects -----------------------------------------
+Luecken.SCObject_Cal  <- subset(Luecken.SCObject_Train, cells = cal_cells)
+Luecken.SCObject_Train <- subset(Luecken.SCObject_Train, cells = train_cells)
+
+# 4) (Optional) Quick peek --------------------------------------------
+table(Luecken.SCObject_Train$Consensus_annotation_detailed_final)
+table(Luecken.SCObject_Cal$Consensus_annotation_detailed_final)
+
+DimPlot(Luecken.SCObject_Train, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T) + DimPlot(Luecken.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final', reduction = 'umap', label = T)
+
+Luecken.SCObject_Train <- NormalizeData(Luecken.SCObject_Train, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+Luecken.SCObject_Cal <- NormalizeData(Luecken.SCObject_Cal, 
+                                    normalization.method = "CLR",
+                                    margin = 2,
+                                    assay = 'ADT',
+                                    verbose = T
+)
+
+
+Luecken.SCObject_Train.AvgExpMat <- AverageExpression(Luecken.SCObject_Train, group.by = 'Consensus_annotation_detailed_final')
+
+Luecken.SCObject_Cal.AvgExpMat <- AverageExpression(Luecken.SCObject_Cal, group.by = 'Consensus_annotation_detailed_final')
+
+train_mat <- as.matrix(Luecken.SCObject_Train.AvgExpMat$ADT)
+cal_mat  <- as.matrix(Luecken.SCObject_Cal.AvgExpMat$ADT)
+
+storage.mode(train_mat) <- "numeric"
+storage.mode(cal_mat)  <- "numeric"
+
+ComplexHeatmap::Heatmap(cor(train_mat, cal_mat), cluster_rows = F, cluster_columns = F)
+```
+
+```{r}
+sceasy::convertFormat(obj = Luecken.SCObject_Train, outFile = paste0(local_wd_folder, '/Data/References/Luecken/140AB_adult_healthy_donor_BMMNCs_annotated_Train.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Luecken.SCObject_Test, outFile = paste0(local_wd_folder, '/Data/References/Luecken/140AB_adult_healthy_donor_BMMNCs_annotated_Test.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+sceasy::convertFormat(obj = Luecken.SCObject_Cal, outFile = paste0(local_wd_folder, '/Data/References/Luecken/140AB_adult_healthy_donor_BMMNCs_annotated_Cal.h5ad'),
+                      from="seurat", to="anndata", assay = 'ADT', main_layer = 'counts')
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Luecken.SCObject_Train[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Luecken.SCObject_Train@meta.data)[grep(TRUE,Luecken.SCObject_Train@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Luecken.SCObject_Train)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Luecken.SCObject_Train, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    obj_one <- SketchData(
+      object   = obj_one,
+      group.by = NULL,
+      features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    obj_rest <- subset(Luecken.SCObject_Train, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    one_ids  <- colnames(obj_one@assays$sketch)
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Luecken.SCObject_One  <- subset(Luecken.SCObject_Train, cells = one_ids)
+    Luecken.SCObject_Rest <- subset(Luecken.SCObject_Train, cells = rest_lbl)
+
+  print(
+      DimPlot(Luecken.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Luecken.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Training_barcodes_data_folder, "Luecken", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_training_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```
+
+```{r}
+label_cols  <- c("Consensus_annotation_broad_final",
+                 "Consensus_annotation_simplified_final",
+                 "Consensus_annotation_detailed_final")
+
+for (label_col in label_cols) {
+  labels <- Luecken.SCObject_Test[[label_col]][,1]
+  labels[is.na(labels)] <- "NA"
+  lvls <- sort(unique(labels))
+
+  for (lbl in lvls) {
+    one_ids <- rownames(Luecken.SCObject_Test@meta.data)[grep(TRUE,Luecken.SCObject_Test@meta.data[,label_col] == lbl)]
+    rest_ids <- colnames(Luecken.SCObject_Test)[labels != lbl]
+    if (!length(rest_ids)) next
+    
+    n_pos   <- length(one_ids)
+    
+    obj_one <- subset(Luecken.SCObject_Test, 
+                      cells = one_ids)
+
+    # ADT normalization
+    obj_one <- NormalizeData(
+      obj_one, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_one <- FindVariableFeatures(obj_one, assay = "ADT")
+
+    if (n_pos <= 50) {
+      
+      one_ids  <- one_ids
+      
+    } else {
+    
+      obj_one <- SketchData(
+        object   = obj_one,
+        group.by = NULL,
+        features = obj_one@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+        assay    = "ADT",
+        n        = min(round(n_pos), round(length(rest_ids))),
+        seed     = 123,
+        verbose  = TRUE
+      )
+      
+      one_ids  <- colnames(obj_one@assays$sketch)
+      
+    }
+
+    obj_rest <- subset(Luecken.SCObject_Test, cells = rest_ids)
+
+    # ADT normalization
+    obj_rest <- NormalizeData(
+      obj_rest, normalization.method = "CLR",
+      margin = 2, assay = "ADT", verbose = TRUE
+    )
+
+    obj_rest <- FindVariableFeatures(obj_rest, assay = "ADT")
+
+    obj_rest <- SketchData(
+      object   = obj_rest,
+      group.by = NULL,
+      features = obj_rest@assays$ADT@var.features,      # or set to NULL if your SketchData handles it
+      assay    = "ADT",
+      n        = min(round(n_pos), round(length(rest_ids))),
+      seed     = 123,
+      verbose  = TRUE
+    )
+
+    # Current label vs downsampled rest
+    rest_lbl <- colnames(obj_rest@assays$sketch)  # after sketch this is the sampled set
+
+    Luecken.SCObject_One  <- subset(Luecken.SCObject_Test, cells = one_ids)
+    Luecken.SCObject_Rest <- subset(Luecken.SCObject_Test, cells = rest_lbl)
+
+  print(
+      DimPlot(Luecken.SCObject_One,  group.by = label_col,
+              reduction = "umap", label = TRUE) +
+          DimPlot(Luecken.SCObject_Rest, group.by = label_col,
+                  reduction = "umap", label = TRUE)
+  )
+
+    # --- Write paired barcodes safely --------------------------------------
+    # Pad/truncate to equal length to avoid data.frame length errors
+    L <- max(length(one_ids), length(rest_lbl))
+    length(one_ids)  <- L
+    length(rest_lbl) <- L
+
+    df <- data.frame(
+      Positive = one_ids,
+      Negative = rest_lbl,
+      stringsAsFactors = FALSE
+    )
+
+    out_dir <- file.path(Testing_barcodes_data_folder, "Luecken", label_col)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    safe_lbl <- gsub("[^A-Za-z0-9_.-]+", "_", lbl)
+    out_csv  <- file.path(out_dir, paste0("Barcodes_testing_class_", safe_lbl, ".csv"))
+    write.csv(df, file = out_csv, row.names = TRUE)
+  }
+}
+
+
+```

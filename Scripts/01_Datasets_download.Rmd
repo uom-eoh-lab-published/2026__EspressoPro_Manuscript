@@ -1,0 +1,200 @@
+---
+title: "ADT/CITESeq reference datasets_download"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Setup
+
+Defining work directory within rmarkdown chunk
+
+```{r setup, include=TRUE}
+local_wd_folder = dirname(dirname(rstudioapi::getSourceEditorContext()$path))
+knitr::opts_knit$set(root.dir = local_wd_folder)
+```
+
+Defining input data and output directories
+
+```{r}
+data_folder = paste(local_wd_folder, '/Data', sep = '')
+Figures_folder = paste(local_wd_folder, '/Figures', sep = '')
+
+dir.create(data_folder, showWarnings = FALSE, recursive = TRUE)
+dir.create(Figures_folder, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r}
+reference_data_folder = paste(local_wd_folder, '/Data/References', sep = '')
+
+dir.create(reference_data_folder, showWarnings = FALSE, recursive = TRUE)
+```
+
+Change the default timeout for long downloads accordingly to your connection speed
+
+```{r}
+options(timeout=3000)
+```
+
+Setting seed
+
+This step ensures reproducibility in randomized processes
+
+```{r}
+set.seed(123)
+```
+
+Loading libraries
+
+```{r}
+library(SeuratDisk, quietly = T)
+library(sceasy, quietly = T)
+library(stringr, quietly = T)
+library(Seurat, quietly = T)
+library(R.utils, quietly = T)
+```
+
+# 2. Reference Downloading
+
+## - Zhang X. et al. (2024). Nature Immunology 2024
+
+Name paper: "An immunophenotype-coupled transcriptomic atlas of human hematopoietic progenitors"
+Link to paper: "https://www.nature.com/articles/s41590-024-01782-4"
+
+DATASET: GSE245108 - Four healthy donor bone marrow mono nuclear cells
+
+```{r}
+dir.create(paste(reference_data_folder, '/Zhang', sep = ''), showWarnings = F)
+```
+
+```{r}
+packageurl <- "http://cran.r-project.org/src/contrib/Archive/rjson/rjson_0.2.21.tar.gz"
+install.packages(packageurl, repos=NULL, type="source")
+```
+
+```{bash}
+conda create -n synapse python==3.11.1
+```
+
+```{r}
+library(usethis)
+usethis::edit_r_environ()
+# Create an evonriment variable as follows:
+# RETICULATE_PYTHON="/path/to/anaconda3/envs/synapse/bin/python3"
+```
+
+```{r}
+install.packages("synapser", repos = c("http://ran.synapse.org", "https://cloud.r-project.org"))
+
+library(synapser)
+
+#INSERT YOUR TOKEN synLogin(authToken = '')
+
+syn53237571 <- synGet(entity='syn63092635', version=1, downloadLocation='/project/meadlab/shared/01__Resources/00__Data/02__PubliclyAvailable/01__Human/01__scRNAseq/Healthy_BM/Processed') 
+```
+
+## - Hao Y. et al. (2021). Cell
+
+Name paper: "Integrated analysis of multimodal single-cell data"
+Link to paper: "https://doi.org/10.1016/j.cell.2021.04.048"
+
+DATASET: Expression of 228 surface markers in donors PBMCs
+
+```{r}
+dir.create(paste(reference_data_folder, '/Hao', sep = ''), showWarnings = F)
+```
+
+```{r}
+url  <- "https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat"
+
+out  <- file.path(reference_data_folder,
+                  "Hao",
+                  "228AB_healthy_donors_PBMNCs.h5seurat")
+
+dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
+
+download.file(
+  url,
+  destfile = out,
+  mode     = "wb",                     # binary write
+  method   = if (capabilities("libcurl")) "libcurl" else "auto",
+  quiet    = FALSE                     # progress bar
+)
+
+# If it doesn't work just download through the website
+```
+
+```{r}
+Hao_228ABs <- LoadH5Seurat(paste(reference_data_folder, '/Hao/228AB_healthy_donors_PBMNCs.h5seurat', sep = ''))
+```
+
+```{r}
+DefaultAssay(Hao_228ABs) <- 'ADT'
+Hao_228ABs@assays$ADT@meta.features <- data.frame(row.names = rownames(Hao_228ABs@assays$ADT@counts))
+```
+
+```{r}
+Hao_228ABs@assays$SCT <- NULL
+
+sceasy::convertFormat(Hao_228ABs, from="seurat", to="anndata",
+                       outFile=paste(reference_data_folder, '/Hao/228AB_healthy_donors_PBMNCs.h5ad', sep = ''), 
+                      assay = 'ADT', main_layer = 'counts')
+```
+
+## - Triana S. et al. (2021). Nature Immunology
+
+Name paper: "Single-cell proteo-genomic reference maps of the hematopoietic system enable the purification and massive profiling of precisely defined cell states"
+Link to paper: "https://doi.org/10.1038/s41590-021-01059-0"
+
+```{r}
+dir.create(paste(reference_data_folder, '/Triana', sep = ''), showWarnings = F)
+```
+
+DATASET: Expression of 97 surface markers and 462 mRNAs in 49057 cells from healthy young and healthy old bone marrow
+
+```{r}
+url = 'https://figshare.com/ndownloader/files/41037917'
+download.file(url, paste(reference_data_folder, '/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs.rds', sep = ''))
+```
+
+```{r}
+Triana_97ABs <- readRDS(paste(reference_data_folder, '/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs.rds', sep = ''))
+```
+
+```{r}
+DefaultAssay(Triana_97ABs) <- 'AB'
+Triana_97ABs@assays$AB@meta.features <- data.frame(row.names = rownames(Triana_97ABs@assays$AB@counts))
+rownames(Triana_97ABs@assays$AB@counts) <- str_remove_all(rownames(Triana_97ABs), pattern = '-AB')
+rownames(Triana_97ABs@assays$AB@data) <- str_remove_all(rownames(Triana_97ABs), pattern = '-AB')
+rownames(Triana_97ABs@assays$AB@meta.features) <- str_remove_all(rownames(Triana_97ABs), pattern = '-AB')
+```
+
+```{r}
+Triana_97ABs@assays$RNA <- NULL
+Triana_97ABs@assays$BOTH <- NULL
+Triana_97ABs@assays$integrated <- NULL
+
+sceasy::convertFormat(Triana_97ABs, from="seurat", to="anndata",
+                       outFile=paste(reference_data_folder, '/Triana/97AB_young_and_old_adult_healthy_donor_BMMNCs.h5ad', sep = ''), 
+                      assay = 'AB', main_layer = 'counts')
+```
+
+## - Luecken M.D. et al. (2021). NeurIPS 2021 Datasets and Benchmarks Track
+
+Name paper: "A sandbox for prediction and integration of DNA, RNA, and proteins in single cells"
+Link to paper: "https://openreview.net/pdf?id=gN35BGa1Rt"
+
+DATASET: GSE194122 - Nine healthy donor bone marrow mono nuclear cells
+
+```{r}
+dir.create(paste(reference_data_folder, '/Luecken', sep = ''), showWarnings = F)
+```
+
+```{r}
+url = 'https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE194122&format=file&file=GSE194122%5Fopenproblems%5Fneurips2021%5Fcite%5FBMMC%5Fprocessed%2Eh5ad%2Egz'
+download.file(url, paste(reference_data_folder, '/Luecken/140AB_adult_healthy_donor_BMMNCs.h5ad.gz', sep = ''))
+
+gunzip(paste(reference_data_folder, '/Luecken/140AB_adult_healthy_donor_BMMNCs.h5ad.gz', sep = ''))
+```
