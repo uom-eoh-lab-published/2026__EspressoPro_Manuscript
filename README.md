@@ -15,15 +15,15 @@
 
 This is the code repository for the **EspressoPro** manuscript - a machine learning pipeline for automated cell type annotation of single-cell protein expression data (ADT). Here we described the logical steps towards the making of this tool which is primarily tailed for use on MissionBio Tapestri DNA+ADT data on blood or bone marrow derived monuclear cells.
 
-**Related Pipeline Repository:** [uom-eoh-lab-published/2024__EspressoPro](https://github.com/uom-eoh-lab-published/2024__EspressoPro)
+**Related Pipeline Repository:** [uom-eoh-lab-published/2026__EspressoPro](https://github.com/uom-eoh-lab-published/2026__EspressoPro)
 
 ## Instructions on reproducibility:
 
 1. **Clone the GitHub repository:**
 
 ```bash
-git clone https://github.com/uom-eoh-lab-published/2024__EspressoPro_Manuscript.git
-cd 2024__EspressoPro_Manuscript
+git clone https://github.com/uom-eoh-lab-published/2026__EspressoPro_Manuscript.git
+cd 2026__EspressoPro_Manuscript
 ```
 
 2. **Set up the computational environment:**
@@ -34,29 +34,29 @@ conda env create -f Environments/Installation/Espressopro_manuscript.yml
 conda activate Espressopro_manuscript
 
 # Install the main EspressoPro pipeline
-pip install git+https://github.com/uom-eoh-lab-published/2024__EspressoPro.git
+pip install git+https://github.com/uom-eoh-lab-published/2026__EspressoPro.git
 ```
 
 3. **Execute analysis scripts in order:**
 
 ```bash
 # 1. Download and organize datasets (R)
-Rscript -e "rmarkdown::render('Scripts/01_Datasets_download.Rmd')"
+# Download datasets as in "Scripts/01_Datasets_download.Rmd"
 
 # 2. Process and harmonize reference data (Python)
-jupyter notebook Scripts/02_References_harmonisation.ipynb
+# Run this Jupyter Notebook with Mosaic_2 env "Scripts/02_References_harmonisation.ipynb"
 
 # 3. Partition data for training/testing (R)
-Rscript -e "rmarkdown::render('Scripts/03_Partitioning.Rmd')"
+# Run this Rmd having installed the sceasy python env "Scripts/03_Partitioning.ipynb"
 
 # 4. Train classification models (Python)
-jupyter notebook Scripts/04_Models_training.ipynb
+# Run this Jupyter Notebook with Mosaic_2 env "Scripts/04_Models_training.ipynb"
 
-# 5. Map cell type ontologies (Python)
-jupyter notebook Scripts/05_Ontologies.ipynb
+# 5. Map cell type ontologies (Python) (Optional)
+# To generate the ontologies figure run the Jupyter Notebook with Mosaic_2 env "Scripts/05_Ontologies.ipynb"
 
 # 6. Generate predictions and validate models (Python)
-jupyter notebook Scripts/06_Models_prediction.ipynb
+# To test the predictions run the Jupyter Notebook with Mosaic_2 env "Scripts/06_Models_prediction.ipynb"
 ```
 
 **Coded in/requires:**
@@ -71,22 +71,22 @@ If using any code here published and/or data from this publication please rememb
 **• BibTeX Style:**
 
 ```bibtex
-@article{espressopro2024,
+@article{espressopro2026,
   title={EspressoPro: An Automated Machine Learning Driven Protein Annotator For Tapestri Data},
   author={[Author Names]},
   journal={[Journal Name]},
-  year={2024},
+  year={2026},
   doi={[DOI]}
 }
 ```
 
 **• APA Style:**
 
-> [Author Names]. (2024). EspressoPro: An Automated Machine Learning Driven Protein Annotator For Tapestri Data. *[Journal Name]*, [Volume(Issue)], [Pages]. https://doi.org/[DOI]
+> [Author Names]. (2026). EspressoPro: An Automated Machine Learning Driven Protein Annotator For Tapestri Data. *[Journal Name]*, [Volume(Issue)], [Pages]. https://doi.org/[DOI]
 
 **• Vancouver Style:**
 
-> [Author Names]. EspressoPro: An Automated Machine Learning Driven Protein Annotator For Tapestri Data. [Journal Name]. 2024;[Volume]:[Pages]. doi:[DOI]
+> [Author Names]. EspressoPro: An Automated Machine Learning Driven Protein Annotator For Tapestri Data. [Journal Name]. 2026;[Volume]:[Pages]. doi:[DOI]
 
 # Networking:
 

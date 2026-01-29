@@ -33,6 +33,11 @@ knitr::opts_chunk$set(
 
 # 1. Setup and Configuration
 
+```{r}
+# Set reticulate to use sceasy environment
+# 
+```
+
 ```{r load-libraries, message=FALSE}
 # Core packages
 library(here)
@@ -1212,11 +1217,24 @@ cat("═════════════════════════
 # Session Information
 
 ```{r session-info}
+# Get current script name (works in RStudio)
+script_name <- tryCatch(
+  {
+    tools::file_path_sans_ext(basename(rstudioapi::getActiveDocumentContext()$path))
+  },
+  error = function(e) "interactive_session"
+)
+
+out_file <- here::here(paste0(script_name, "_sessionInfo.txt"))
+
+sink(out_file)
 cat("\n╔═══════════════════════════════════════════════════╗\n")
 cat("║              SESSION INFORMATION                  ║\n")
 cat("╚═══════════════════════════════════════════════════╝\n\n")
-
 sessionInfo()
+sink()
+
+message("Session info saved to: ", out_file)
 ```
 
 **Analysis Complete:** `r Sys.time()`
