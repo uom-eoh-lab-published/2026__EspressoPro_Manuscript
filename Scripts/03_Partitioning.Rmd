@@ -1225,7 +1225,7 @@ script_name <- tryCatch(
   error = function(e) "interactive_session"
 )
 
-out_file <- here::here(paste0(script_name, "_sessionInfo.txt"))
+out_file <- here::here(paste0("Scripts/", script_name, "_sessionInfo.txt"))
 
 sink(out_file)
 cat("\n╔═══════════════════════════════════════════════════╗\n")
