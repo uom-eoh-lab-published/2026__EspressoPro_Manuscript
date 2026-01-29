@@ -2,10 +2,10 @@
 
 ## General Description:
 
-**First Author:** [Kristian Gurashi]
-**Correspondence:** [Corresponding Author]
+**First Author:** Kristian Gurashi  
+**Correspondence:** Daniel H. Wiseman  
 **Focus:** Single-cell surface protein expression analysis and Cell type annotation  
-**Keywords:** Tapestri, ADT, Annotation, ML, Classifiers. 
+**Keywords:** Tapestri, ADT, Annotation, ML, Classifiers  
 
 ## Publication link:
 
