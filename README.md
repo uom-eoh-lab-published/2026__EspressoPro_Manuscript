@@ -30,8 +30,8 @@ cd 2026__EspressoPro_Manuscript
 
 ```bash
 # Create conda environment from provided file
-conda env create -f Environments/Installation/Espressopro_manuscript.yml
-conda activate Espressopro_manuscript
+conda env create -f Environments/Installation/Mosaic_2.yml
+conda activate Mosaic_2
 
 # Install the main EspressoPro pipeline
 pip install git+https://github.com/uom-eoh-lab-published/2026__EspressoPro.git
@@ -90,12 +90,12 @@ If using any code here published and/or data from this publication please rememb
 
 # Networking:
 
-If you wish to reach out you can connect with [First Author] at 👇:
+If you wish to reach out you can connect with Kristian at 👇:
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-blue?style=flat&logo=linkedin)](https://www.linkedin.com/in/[profile]) [![Twitter](https://img.shields.io/badge/Twitter-lightblue?style=flat&logo=twitter)](https://twitter.com/[handle]) [![Email](https://img.shields.io/badge/Email-red?style=flat&logo=gmail)](mailto:[email@domain.com])
 
 # Biography:
 
-To know more about [First Author Name] explore their biography and list of publications at 👇:
+To know more about Kristian explore their biography and list of publications at 👇:
 
 [![GitHub](https://img.shields.io/badge/GitHub-black?style=flat&logo=github)](https://github.com/[username]) [![ORCID](https://img.shields.io/badge/ORCID-green?style=flat&logo=orcid)](https://orcid.org/[orcid-id]) [![Google Scholar](https://img.shields.io/badge/Google%20Scholar-blue?style=flat&logo=google-scholar)](https://scholar.google.com/citations?user=[user-id])
